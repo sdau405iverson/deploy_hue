@@ -1,4 +1,4 @@
 *.retry
-*.tar.gz
+hue_opt*.tar.gz
 *.tar
 *.zip
