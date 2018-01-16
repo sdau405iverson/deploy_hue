@@ -1,0 +1,3 @@
+[edge-node]
+192.168.3.183 ansible_ssh_user=samsing ansible_ssh_pass=samsing
+

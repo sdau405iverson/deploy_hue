@@ -1,0 +1,163 @@
+---
+- name: install dependent package
+  hosts: edge-node
+  become: true
+  become_user: root
+  become_method: su
+  vars:
+    - ansible_become_pass: redhat
+  vars_files:
+    - ../configs/hue_vars.yml
+  tasks:
+    - name: install package
+      yum:
+        name: "{{ item }}"
+        state: present
+      with_items: "{{ dependencies }}"
+
+    - name: add user(hue) if not exist
+      user:
+        name: hue
+        state: present
+        password: hue
+        update_password: on_create
+
+    - name: unarchive package
+      unarchive:
+        src: "{{ hue_package.src }}"
+        dest: "{{ hue_package.deploy_path }}"
+        owner: hue
+        group: hue
+        remote_src: "{{ hue_package.use_remote_source }}"
+
+    - name: install requiremnts for jwt
+      shell: ./build/env/bin/pip install --no-index --find-links=ext/jwt -r ext/jwt/requirements.txt
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+      register: result_install_requirements
+
+    - debug: var=result_install_requirements.stdout_lines
+
+    - name: install jwt
+      shell: ./build/env/bin/python2.7 ./build/env/bin/pip install ext/jwt/pip-9.0.1-py2.py3-none-any.whl
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+      register: resutl_install_jwt
+
+    - debug:
+        var: resutl_install_jwt.stdout_lines
+
+    - name: create directory /etc/hue
+      file:
+        path: /etc/hue
+        state: directory
+        mode: 0777
+        owner: hue
+        group: hue
+
+    - name: prepare cert.pem
+      copy:
+        src: "{{ hue_package.deploy_path }}/hue/ext/cert.pem"
+        dest: "{{ hue_package.deploy_path }}/hue/cert.pem"
+        owner: hue
+        group: hue
+        remote_src: yes
+
+
+- name: prepare config file
+  hosts: edge-node
+  become: yes
+  become_method: su
+  become_user: hue
+  vars:
+    - ansible_become_pass: hue
+  vars_files:
+    - ../configs/hue_vars.yml
+  tasks:
+    - name: kinit ticket of hue
+      shell: "kinit -kt {{ desktop.kerberos.hue_keytab }} {{ desktop.kerberos.hue_principal }}"
+
+    - name: klist
+      shell: "klist"
+      register: klist_status
+
+    - set_fact:
+        ccache_path: "{{ klist_status.stdout_lines[0] | regex_search(regexp,'\\1') | first }}"
+      vars:
+        regexp: 'FILE:(.+)'
+
+    - debug: var=ccache_path
+
+    - name: dispatch hue config file
+      template:
+        src: ../templates/pseudo-distributed.ini.j2
+        dest: /opt/hue/desktop/conf/pseudo-distributed.ini
+        owner: hue
+        group: hue
+        force: yes
+      become_user: root
+      vars:
+        ansible_become_pass: redhat
+
+- name: init db
+  hosts: edge-node
+  become: true
+  become_user: hue
+  become_method: su
+  vars:
+    - ansible_become_pass: hue
+  vars_files:
+    - ../configs/hue_vars.yml
+  handlers:
+    - name: syncdb
+      shell: ./build/env/bin/hue syncdb
+      register: syncdb_result
+      until: syncdb_result.rc == 0
+      retries: 2
+      delay: 1
+      ignore_errors: yes
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+
+    - name: migrate
+      shell: ./build/env/bin/hue migrate
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+  tasks:
+    - name:
+      yum:
+        name: postgresql-devel
+        state: present
+      become_user: root
+      vars:
+        ansible_become_pass: redhat
+      notify:
+        - syncdb
+        - migrate
+
+    - name: copy package
+      copy:
+        src: ../package/psycopg2-2.7.3.2.tar.gz
+        dest: "{{ hue_package.deploy_path }}/hue/ext/psycopg2-2.7.3.2.tar.gz"
+        owner: hue
+        group: hue
+      
+    - name: install psycopg2
+      shell: ./build/env/bin/pip install ext/psycopg2-2.7.3.2.tar.gz
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+
+    - name: get status of hue
+      shell: ps -ef | grep [r]unserver
+      register: hue_run_status
+      ignore_errors: yes
+      become_user: root
+      vars:
+        ansible_become_pass: redhat
+
+    - name: start hue
+      shell: "nohup ./build/env/bin/hue runserver 0.0.0.0:8888 &"
+     # debug: var=hue_run_status.stdout.find('/build/env/bin/hue runserver')
+      args:
+        chdir: /opt/hue
+      when: hue_run_status.rc != 0

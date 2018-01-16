@@ -1,0 +1,45 @@
+- name: init db
+  hosts: edge-node
+  become: true
+  become_user: hue
+  become_method: su
+  vars:
+    - ansible_become_pass: hue
+  vars_files:
+    - ../configs/hue_vars.yml
+  handlers:
+    - name: syncdb
+      shell: ./build/env/bin/hue syncdb
+      args: 
+        chdir: "{{ hue_package.deploy_path }}/hue"
+      retries: 2
+      delay: 1
+      ignore_errors: yes
+
+    - name: migrate
+      shell: ./build/env/bin/hue migrate
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
+  tasks:
+    - name:
+      yum:
+        name: postgresql-devel
+        state: present
+      become_user: root
+      vars:
+        ansible_become_pass: redhat
+      notify:
+        - syncdb
+        - migrate
+        
+    - name: copy package
+      copy:
+        src: ../package/psycopg2-2.7.3.2.tar.gz
+        dest: "{{ hue_package.deploy_path }}/hue/ext/psycopg2-2.7.3.2.tar.gz"
+        owner: hue
+        group: hue
+
+    - name: install psycopg2
+      shell: ./build/env/bin/pip install ext/psycopg2-2.7.3.2.tar.gz
+      args:
+        chdir: "{{ hue_package.deploy_path }}/hue"
